@@ -101,6 +101,90 @@ def get_credentials():
     return user, pwd
 
 
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def _read_env_value(key: str) -> str:
+    """从 .env 文件读某 key 的值（不进环境变量），用于展示。"""
+    if not os.path.exists(ENV_FILE):
+        return ""
+    with open(ENV_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == key:
+                return v.strip().strip("'\"")
+    return ""
+
+
+def _save_env(values: dict) -> None:
+    """把 values 写入 .env，保留已有的其他键。"""
+    existing = {}
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                existing[k.strip()] = v.strip()
+    existing.update(values)
+    with open(ENV_FILE, "w", encoding="utf-8") as f:
+        for k, v in existing.items():
+            f.write(f"{k}={v}\n")
+
+
+def _prompt_credentials() -> tuple:
+    """交互式输入学号密码，返回 (user, pwd)。"""
+    print("首次使用，请输入统一身份认证凭据：", file=sys.stderr)
+    user = input("学号: ").strip()
+    if not user:
+        sys.exit("学号不能为空。")
+    import getpass
+    pwd = getpass.getpass("密码（输入时不显示）: ")
+    if not pwd:
+        sys.exit("密码不能为空。")
+    return user, pwd
+
+
+def ensure_credentials_interactive() -> None:
+    """
+    交互式凭据配置（仅当未显式传参、且非 CI 环境时触发）：
+      - .env 不存在或缺少账号密码 → 引导输入并写入 .env
+      - .env 已有账号密码 → 询问用已有的还是重新输入
+    配置完成后把凭据塞进环境变量，供后续 get_credentials 使用。
+    """
+    # CI / 非交互环境不触发交互
+    if os.environ.get("CI") or not sys.stdin.isatty():
+        return
+    user = os.environ.get("TONGJI_USERNAME") or _read_env_value("TONGJI_USERNAME")
+    pwd = os.environ.get("TONGJI_PASSWORD") or _read_env_value("TONGJI_PASSWORD")
+
+    if not user or not pwd:
+        # 首次：引导输入
+        new_user, new_pwd = _prompt_credentials()
+        _save_env({"TONGJI_USERNAME": new_user, "TONGJI_PASSWORD": new_pwd})
+        os.environ["TONGJI_USERNAME"] = new_user
+        os.environ["TONGJI_PASSWORD"] = new_pwd
+        print(f"[*] 凭据已保存到 {ENV_FILE}（已加入 .gitignore，不会提交）", file=sys.stderr)
+        return
+
+    # 非首次：询问用旧还是重输
+    print(f"\n已检测到已保存的凭据：学号 {user}", file=sys.stderr)
+    choice = input("是否使用已保存的凭据？(Y 使用旧的 / n 重新输入) [Y]: ").strip().lower()
+    if choice == "n" or choice == "no":
+        new_user, new_pwd = _prompt_credentials()
+        _save_env({"TONGJI_USERNAME": new_user, "TONGJI_PASSWORD": new_pwd})
+        os.environ["TONGJI_USERNAME"] = new_user
+        os.environ["TONGJI_PASSWORD"] = new_pwd
+        print(f"[*] 凭据已更新到 {ENV_FILE}", file=sys.stderr)
+    else:
+        os.environ.setdefault("TONGJI_USERNAME", user)
+        os.environ.setdefault("TONGJI_PASSWORD", pwd)
+
+
 # ── RSA 加密（对齐前端 JSEncrypt：PKCS1v15）────────────────────────────
 def rsa_encrypt(plaintext: str) -> str:
     der = base64.b64decode(RSA_PUBKEY_B64)
@@ -438,6 +522,10 @@ def notify(subject: str, body: str) -> None:
 # ── 主流程 ─────────────────────────────────────────────────────────────
 def main():
     load_env()
+    # 仅当不带任何参数运行时，触发交互式凭据配置
+    # （带参数 / CI / --watch 等场景照旧读环境变量，不交互）
+    if len(sys.argv) == 1:
+        ensure_credentials_interactive()
     ap = argparse.ArgumentParser(description="同济大学成绩自动查询（全自动登录）")
     ap.add_argument("--student-id", default="", help="学号，留空则自动获取")
     ap.add_argument("--term", help="只看某学期 calName，如 20252")
