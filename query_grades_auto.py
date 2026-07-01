@@ -32,11 +32,14 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
+import smtplib
 import sys
 import time
+from email.mime.text import MIMEText
 from typing import Optional
 from urllib.parse import quote, urlparse, parse_qs
 
@@ -313,6 +316,125 @@ def print_summary(data: dict, only_term: str, as_json: bool):
         print()
 
 
+# ── 成绩变动检测 ───────────────────────────────────────────────────────
+def grades_signature(data: dict) -> dict:
+    """把每门课的 (课程名+成绩+绩点+学分) 做指纹，用于对比变动。"""
+    sig = {}
+    for t in data.get("data", {}).get("term", []):
+        for c in t.get("creditInfo", []):
+            key = f"{t.get('calName')}|{c.get('courseCode')}|{c.get('courseName')}"
+            val = f"{c.get('score') or c.get('scoreName')}|{c.get('gradePoint')}|{c.get('credit')}"
+            sig[key] = val
+    return sig
+
+
+SNAPSHOT_FILE = os.environ.get("TONGJI_SNAPSHOT_FILE",
+                               os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            ".tongji_grades_snapshot.json"))
+
+
+def detect_changes(data: dict) -> tuple:
+    """对比快照，返回 (新增课程列表, 是否有变动)。首次运行返回 (全部, True)。"""
+    new_sig = grades_signature(data)
+    old_sig = {}
+    if os.path.exists(SNAPSHOT_FILE):
+        try:
+            with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                old_sig = json.load(f).get("sig", {})
+        except Exception:
+            old_sig = {}
+    # 课名 → 详情映射，用于通知正文
+    course_map = {}
+    for t in data.get("data", {}).get("term", []):
+        for c in t.get("creditInfo", []):
+            k = f"{t.get('calName')}|{c.get('courseCode')}|{c.get('courseName')}"
+            course_map[k] = {
+                "term": t.get("termName"),
+                "name": c.get("courseName"),
+                "score": c.get("score") or c.get("scoreName"),
+                "gradePoint": c.get("gradePoint"),
+                "credit": c.get("credit"),
+            }
+    added, changed = [], []
+    for k, v in new_sig.items():
+        if k not in old_sig:
+            added.append(course_map[k])
+        elif old_sig[k] != v:
+            changed.append({**course_map[k], "old": old_sig[k]})
+    # 保存新快照
+    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"sig": new_sig, "ts": int(time.time())}, f, ensure_ascii=False)
+    return added, changed, not bool(old_sig)
+
+
+# ── 通知推送 ───────────────────────────────────────────────────────────
+def build_message(added: list, changed: list, is_first: bool, data: dict) -> tuple:
+    """构造通知标题和正文。返回 (subject, body)。"""
+    d = data.get("data", {})
+    gpa = d.get("totalGradePoint")
+    if is_first:
+        subject = f"[同济成绩] 首次监控已建立，GPA {gpa}"
+        body_lines = [f"首次监控快照已建立，当前 GPA：{gpa}，"
+                      f"已修学分 {d.get('actualCredit')}，挂科 {d.get('failingCourseCount')} 门。",
+                      "", "当前共记录 %d 门课程。后续有新成绩会推送。" % len(grades_signature(data))]
+        return subject, "\n".join(body_lines)
+    n = len(added) + len(changed)
+    subject = f"[同济成绩] 发现 {n} 门成绩变动"
+    body_lines = []
+    if added:
+        body_lines.append(f"新增 {len(added)} 门：")
+        for c in added:
+            body_lines.append(f"  • {c['term']} {c['name']}：{c['score']}（绩点 {c['gradePoint']}，{c['credit']} 学分）")
+    if changed:
+        body_lines.append(f"\n成绩更新 {len(changed)} 门：")
+        for c in changed:
+            body_lines.append(f"  • {c['term']} {c['name']}：{c['score']}（绩点 {c['gradePoint']}）")
+    body_lines.append(f"\n当前 GPA：{gpa}，已修学分 {d.get('actualCredit')}，挂科 {d.get('failingCourseCount')} 门。")
+    return subject, "\n".join(body_lines)
+
+
+def send_email(subject: str, body: str) -> None:
+    """SMTP 发邮件。环境变量：
+        TONGJI_SMTP_HOST / TONGJI_SMTP_PORT / TONGJI_SMTP_USER / TONGJI_SMTP_PASS
+        TONGJI_MAIL_TO（收件人，逗号分隔）
+    """
+    host = os.environ.get("TONGJI_SMTP_HOST")
+    if not host:
+        print("[*] 未配置 TONGJI_SMTP_HOST，跳过邮件通知", file=sys.stderr)
+        return
+    user = os.environ.get("TONGJI_SMTP_USER", "")
+    port = int(os.environ.get("TONGJI_SMTP_PORT", "465"))
+    to_list = [x.strip() for x in os.environ.get("TONGJI_MAIL_TO", "").split(",") if x.strip()]
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = ", ".join(to_list)
+    with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
+        smtp.login(user, os.environ.get("TONGJI_SMTP_PASS", ""))
+        smtp.sendmail(user, to_list, msg.as_string())
+    print(f"[*] 邮件已发送到 {len(to_list)} 个收件人", file=sys.stderr)
+
+
+def send_serverchan(subject: str, body: str) -> None:
+    """Server酱推送到微信。环境变量 TONGJI_SCKEY（SendKey）。"""
+    sckey = os.environ.get("TONGJI_SCKEY")
+    if not sckey:
+        print("[*] 未配置 TONGJI_SCKEY，跳过 Server酱通知", file=sys.stderr)
+        return
+    import requests as _rq
+    url = f"https://sctapi.ftqq.com/{sckey}.send"
+    r = _rq.post(url, data={"text": subject, "desp": body}, timeout=20)
+    if r.status_code == 200 and r.json().get("code") == 0:
+        print("[*] Server酱已推送到微信", file=sys.stderr)
+    else:
+        print(f"[!] Server酱推送失败：{r.status_code} {r.text[:120]}", file=sys.stderr)
+
+
+def notify(subject: str, body: str) -> None:
+    send_email(subject, body)
+    send_serverchan(subject, body)
+
+
 # ── 主流程 ─────────────────────────────────────────────────────────────
 def main():
     load_env()
@@ -324,21 +446,39 @@ def main():
                     help="登录后把 session cookie 存盘，下次免登录复用")
     ap.add_argument("--no-reuse", action="store_true",
                     help="忽略已存 cookie，强制重新登录")
+    ap.add_argument("--watch", action="store_true",
+                    help="监控模式：对比上次成绩快照，有变动或首次才推送通知")
     args = ap.parse_args()
 
+    data = run(args)
+    if args.watch:
+        added, changed, is_first = detect_changes(data)
+        subject, body = build_message(added, changed, is_first, data)
+        print(f"[*] 变动：新增 {len(added)} 门，更新 {len(changed)} 门，首次={is_first}",
+              file=sys.stderr)
+        # 首次只建快照不推送，避免首次运行误报；有真实变动才推
+        if (added or changed) and not is_first:
+            notify(subject, body)
+        elif is_first:
+            print("[*] 首次运行，已建立监控快照，本次不推送", file=sys.stderr)
+        else:
+            print("[*] 成绩无变动，不推送", file=sys.stderr)
+    else:
+        print_summary(data, args.term, args.json)
+
+
+def run(args) -> dict:
+    """执行登录 + 查成绩，返回成绩 JSON dict。供 main 和外部调用。"""
     # 优先复用存盘 cookie
-    session = None
     if not args.no_reuse:
         session = load_cookie_session()
         if session:
             try:
                 data = fetch_grades(session, args.student_id)
                 if data.get("code") == 200:
-                    print_summary(data, args.term, args.json)
-                    return
+                    return data
             except Exception as e:
                 print(f"[*] 存盘 cookie 失效（{e}），重新登录…", file=sys.stderr)
-        session = None
 
     # 全自动登录
     print("[*] 正在登录统一身份认证…", file=sys.stderr)
@@ -346,9 +486,7 @@ def main():
     print("[*] 登录成功", file=sys.stderr)
     if args.save_cookie:
         save_cookie(session)
-
-    data = fetch_grades(session, args.student_id)
-    print_summary(data, args.term, args.json)
+    return fetch_grades(session, args.student_id)
 
 
 if __name__ == "__main__":

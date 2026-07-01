@@ -1,0 +1,41 @@
+name: 成绩监控
+
+on:
+  schedule:
+    # 每 5 小时跑一次（UTC 时间，约北京时间每 5 小时）
+    # 注意：GitHub Actions 定时任务有几分钟的随机延迟，且公共仓库在无人关注时可能被降频
+    - cron: "0 */5 * * *"
+  workflow_dispatch:  # 支持手动触发，用于首次建立快照或测试
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 恢复成绩快照
+        uses: actions/cache@v4
+        with:
+          path: .tongji_grades_snapshot.json
+          key: tongji-grades-snapshot
+
+      - name: 查询并检测成绩变动
+        env:
+          TONGJI_USERNAME: ${{ secrets.TONGJI_USERNAME }}
+          TONGJI_PASSWORD: ${{ secrets.TONGJI_PASSWORD }}
+          # 邮件通知（可选，不配则跳过邮件）
+          TONGJI_SMTP_HOST: ${{ secrets.TONGJI_SMTP_HOST }}
+          TONGJI_SMTP_PORT: ${{ secrets.TONGJI_SMTP_PORT }}
+          TONGJI_SMTP_USER: ${{ secrets.TONGJI_SMTP_USER }}
+          TONGJI_SMTP_PASS: ${{ secrets.TONGJI_SMTP_PASS }}
+          TONGJI_MAIL_TO: ${{ secrets.TONGJI_MAIL_TO }}
+          # Server酱微信通知（可选，不配则跳过微信）
+          TONGJI_SCKEY: ${{ secrets.TONGJI_SCKEY }}
+        run: python3 query_grades_auto.py --watch

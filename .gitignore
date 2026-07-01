@@ -1,8 +1,9 @@
-# 凭据 —— 含账号密码 / session，严禁提交
+# 凭据 / 运行态 —— 严禁提交
 .env
 *.env
 .tongji_grades_cookie.txt
 .tongji_session_cookie.txt
+.tongji_grades_snapshot.json
 
 # 运行产物
 *.log

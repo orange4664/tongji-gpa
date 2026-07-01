@@ -58,6 +58,55 @@ TONGJI_USERNAME=学号 TONGJI_PASSWORD=密码 python3 query_grades_auto.py
 - **二级认证**（短信/OTP 等）：暂不支持。
 - **首次登录改密**：若系统要求修改密码，请先在浏览器登录处理一次。
 
+## 成绩变动监控 + 推送通知
+
+脚本支持 `--watch` 监控模式：每次运行对比上次成绩快照，发现**新增课程**或**成绩更新**时推送通知。支持邮件和微信（Server酱），可只配一种。
+
+### 本地定时监控（推荐，凭据不出本机）
+
+```bash
+# 1. 配置凭据（账号密码）
+cat > .env <<EOF
+TONGJI_USERNAME=你的学号
+TONGJI_PASSWORD=你的统一身份认证密码
+EOF
+
+# 2. 配置通知（按需二选一或都配）
+# 邮件（以 QQ 邮箱为例，需在 QQ 邮箱设置开启 SMTP 并获取授权码）
+echo 'TONGJI_SMTP_HOST=smtp.qq.com' >> .env
+echo 'TONGJI_SMTP_PORT=465' >> .env
+echo 'TONGJI_SMTP_USER=你的@qq.com' >> .env
+echo 'TONGJI_SMTP_PASS=QQ邮箱授权码' >> .env
+echo 'TONGJI_MAIL_TO=收件人@xx.com' >> .env
+
+# Server酱微信（访问 https://sct.ftqq.com 注册拿 SendKey）
+echo 'TONGJI_SCKEY=你的SendKey' >> .env
+
+# 3. 每 5 小时跑一次（macOS/Linux crontab）
+#   crontab -e 后加入（每 5 小时的第 0 分）：
+#   0 */5 * * * cd /path/to/tongji-gpa && python3 query_grades_auto.py --watch >> watch.log 2>&1
+```
+
+### GitHub Actions 定时监控（开源用户推荐）
+
+仓库已内置 `.github/workflows/grades-watch.yml`，每 5 小时自动跑一次。Fork 或使用本仓库后，在 **Settings → Secrets and variables → Actions** 添加以下 Secrets（按需配置）：
+
+| Secret | 必填 | 说明 |
+|--------|------|------|
+| `TONGJI_USERNAME` | ✅ | 学号 |
+| `TONGJI_PASSWORD` | ✅ | 统一身份认证密码 |
+| `TONGJI_SMTP_HOST` | 邮件 | SMTP 主机，如 `smtp.qq.com` |
+| `TONGJI_SMTP_PORT` | 邮件 | 端口，SSL 默认 `465` |
+| `TONGJI_SMTP_USER` | 邮件 | 发件邮箱 |
+| `TONGJI_SMTP_PASS` | 邮件 | 邮箱授权码（非登录密码） |
+| `TONGJI_MAIL_TO` | 邮件 | 收件邮箱，多个用逗号分隔 |
+| `TONGJI_SCKEY` | 微信 | Server酱 SendKey（sct.ftqq.com） |
+
+配置后在 **Actions** 页面可手动触发 `成绩监控` workflow 测试。首次运行只建立快照不推送，之后有成绩变动才会通知。
+
+> **注意**：GitHub Actions 的 `schedule` 在公开仓库高峰期可能有十几分钟延迟，甚至被降频。若需严格定时，建议用本地 crontab。
+> 成绩快照通过 `actions/cache` 持久化，不会暴露到公开仓库。
+
 ## 文件说明
 
 | 文件 | 作用 |
