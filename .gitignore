@@ -1,0 +1,11 @@
+# 凭据 —— 含账号密码 / session，严禁提交
+.env
+*.env
+.tongji_grades_cookie.txt
+.tongji_session_cookie.txt
+
+# 运行产物
+*.log
+__pycache__/
+*.pyc
+.DS_Store
